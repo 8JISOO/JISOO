@@ -12,4 +12,6 @@ dependencies = [
     "pycryptodome",
     "cryptography",
     "rsa",
+    "pillow",
+    "requests",
 ]

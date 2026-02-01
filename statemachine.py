@@ -253,12 +253,44 @@ class QiangModel:
     @catch_to_fatal()
     async def on_enter_LOGIN(self):
         logging.info(f"[{self.username}] on_enter_LOGIN")
-        # 进入这个状态说明登录肯定失败了或者出错了
-        # 这种情况就应该全新登录并把现有的cookie清干净
+        
+        # ===== 修复：安全删除 Cookie 文件 =====
         if os.path.exists(self.cookies_file):
-            os.remove(self.cookies_file)
+            try:
+                # 先关闭 httpx 客户端释放文件句柄
+                if self.client:
+                    await self.client.aclose()
+                    self.client = None
+                
+                # 清空 cookiejar
+                self.cookiejar.clear()
+                
+                # 删除文件
+                os.remove(self.cookies_file)
+                logging.info(f"[{self.username}] 已删除旧的 Cookie 文件")
+            except PermissionError:
+                # Windows 文件被占用，使用重命名
+                import random
+                backup_file = f"{self.cookies_file}.bak{random.randint(1000, 9999)}"
+                try:
+                    os.rename(self.cookies_file, backup_file)
+                    logging.warning(f"[{self.username}] Cookie 文件被占用，已重命名为 {backup_file}")
+                except Exception as e:
+                    logging.error(f"[{self.username}] 处理 Cookie 文件失败: {e}")
 
         logging.warning(f"[{self.username}] 开始登录")
+
+        # ===== 重新创建 httpx 客户端 =====
+        self.client = httpx.AsyncClient(
+            verify=False,
+            transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.79 Safari/537.36',
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            cookies=self.cookiejar,
+            timeout=self.timeout_seconds
+        )
 
         self.captcha_uid, captcha_code = await schserver.sfrz_captcha(self.client, self.captcha_uid)
 
@@ -553,9 +585,16 @@ class QiangModel:
     async def on_enter_ERROR(self):
         logging.warning(f"[{self.username}] 状态 ERROR（发生致命错误）")
 
-        # cookie 清干净, 等一小会后尝试重新开始
+        # ===== 修复：安全删除 Cookie =====
         if os.path.exists(self.cookies_file):
-            os.remove(self.cookies_file)
+            try:
+                if self.client:
+                    await self.client.aclose()
+                    self.client = None
+                self.cookiejar.clear()
+                os.remove(self.cookies_file)
+            except Exception as e:
+                logging.error(f"[{self.username}] 清理 Cookie 失败: {e}")
 
         await asyncio.sleep(1)
         await self.after_fatal_retry()  # TO PRE_LOGIN

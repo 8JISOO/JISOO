@@ -10,12 +10,31 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 from datetime import datetime
 from typing import Tuple, Optional
+import asyncio
+from chaojiying import Chaojiying
 
 # 为了只初始化一次ocr, 所以定义成全局的来共用
 OCR = ddddocr.DdddOcr()
 OCR.set_ranges("0123456789+-x*/=")  # 文档说可以用这个方法来限制识别出的范围, 不过即使设置了他好像也会把 o 识别成 0
 JWGL_URL = "https://jwgl.hnfnu.edu.cn:9080"
 SFRZ_URL = "https://sfrz.hnfnu.edu.cn"
+
+# 超级鹰客户端（全局单例）
+CHAOJIYING_CLIENT: Optional[Chaojiying] = None
+
+
+def init_chaojiying(username: str, password: str, soft_id: str) -> None:
+    """
+    初始化超级鹰客户端
+    
+    Args:
+        username: 超级鹰用户名
+        password: 超级鹰密码
+        soft_id: 软件ID
+    """
+    global CHAOJIYING_CLIENT
+    CHAOJIYING_CLIENT = Chaojiying(username, password, soft_id)
+    logging.info("✅ 超级鹰客户端初始化成功")
 
 async def sfrz_login(
         client: httpx.AsyncClient,
@@ -179,6 +198,182 @@ async def sfrz_captcha(
     print(f"计算答案: {answer}")
 
     return uid, answer
+
+
+async def sfrz_captcha_click(
+        client: httpx.AsyncClient,
+        uid: str,
+        retry_count: int = 0,
+) -> Tuple[str, str, str]:
+    """
+    获取并识别点选验证码
+    
+    Args:
+        client: httpx客户端
+        uid: 验证码UID（可以为空字符串）
+        retry_count: 重试计数
+    
+    Returns:
+        (uid, 调整后的坐标字符串, pic_id)
+    """
+    # 添加重试限制
+    if retry_count >= 3:
+        raise RuntimeError("❌ 验证码识别失败次数过多（3次），请检查超级鹰配置或余额")
+    
+    if CHAOJIYING_CLIENT is None:
+        raise RuntimeError("请先调用 init_chaojiying() 初始化超级鹰客户端")
+    
+    # 1. 获取验证码信息
+    resp = (await client.get(
+        url=SFRZ_URL + "/lyuapServer/kaptcha",
+        params={"uid": uid},
+    )).raise_for_status().json()
+    
+    uid = resp['uid']
+    captcha_type = resp.get('type', 'COMPUTE')
+    
+    logging.info(f"📸 验证码 UID: {uid}, 类型: {captcha_type}")
+    
+    # 如果是计算类型，使用原来的方法
+    if captcha_type == 'COMPUTE':
+        captcha_uid, answer = await sfrz_captcha(client, uid)
+        return captcha_uid, str(answer), ""
+    
+    # 2. 获取点选验证码的图片
+    # 背景图（需要点击的图片）
+    bg_content = resp.get('content', '')
+    if bg_content:
+        bg_base64 = bg_content.split(',')[1] if ',' in bg_content else bg_content
+        bg_bytes = base64.b64decode(bg_base64)
+    else:
+        logging.error("❌ 未获取到背景图")
+        await asyncio.sleep(1)
+        return await sfrz_captcha_click(client, "", retry_count + 1)
+    
+    # 模板图（提示文字）
+    tpl_content = resp.get('tpl', '')
+    tpl_bytes = None
+    tpl_height = 0
+    if tpl_content:
+        tpl_base64 = tpl_content.split(',')[1] if ',' in tpl_content else tpl_content
+        tpl_bytes = base64.b64decode(tpl_base64)
+    
+    # 3. 合成图片（把提示文字图放在背景图上方）
+    try:
+        from PIL import Image, ImageDraw
+        import io
+        
+        bg_img = Image.open(io.BytesIO(bg_bytes))
+        
+        if tpl_bytes:
+            tpl_img = Image.open(io.BytesIO(tpl_bytes))
+            
+            # 记录尺寸（用于后续坐标调整）
+            bg_width, bg_height = bg_img.size
+            tpl_width, tpl_height = tpl_img.size
+            
+            # 创建新画布：宽度取最大，高度相加
+            new_width = max(bg_width, tpl_width)
+            new_height = tpl_height + bg_height
+            
+            combined = Image.new('RGB', (new_width, new_height), (255, 255, 255))
+            
+            # 粘贴模板图（提示文字）在顶部，居中
+            x_offset = (new_width - tpl_width) // 2
+            combined.paste(tpl_img, (x_offset, 0))
+            
+            # 粘贴背景图在底部，居中
+            x_offset = (new_width - bg_width) // 2
+            combined.paste(bg_img, (x_offset, tpl_height))
+            
+            # 转换为字节
+            output = io.BytesIO()
+            combined.save(output, format='JPEG', quality=95)
+            final_image_bytes = output.getvalue()
+            
+            logging.info(f"✅ 已合成图片")
+            logging.info(f"   背景图尺寸: {bg_width}x{bg_height}")
+            logging.info(f"   模板图尺寸: {tpl_width}x{tpl_height}")
+            logging.info(f"   合成图尺寸: {new_width}x{new_height}")
+        else:
+            final_image_bytes = bg_bytes
+            bg_width, bg_height = bg_img.size
+            tpl_height = 0
+            logging.warning("⚠️ 没有模板图，直接使用背景图")
+
+    except ImportError:
+        logging.error("❌ 需要安装 Pillow: pip install pillow")
+        raise RuntimeError("请先运行: pip install pillow")
+    
+    # 4. 保存合成图片（用于调试）
+    import os
+    os.makedirs("captcha_debug", exist_ok=True)
+    with open(f"captcha_debug/{uid}_combined.jpg", "wb") as f:
+        f.write(final_image_bytes)
+    logging.info(f"💾 合成图片已保存: captcha_debug/{uid}_combined.jpg")
+    
+    # 5. 调用超级鹰识别
+    result = CHAOJIYING_CLIENT.post_pic(
+        image_bytes=final_image_bytes,
+        code_type=9004  # 1~4个坐标，40题分
+    )
+    
+    # 6. 处理识别结果和坐标调整
+    pic_id = result.get('pic_id')
+    pic_str = result.get('pic_str')
+    
+    if not pic_str:
+        logging.error(f"❌ 超级鹰未返回坐标: {result}")
+        await asyncio.sleep(1)
+        return await sfrz_captcha_click(client, "", retry_count + 1)
+    
+    # 解析原始坐标
+    coords = Chaojiying.parse_coordinates(pic_str)
+    logging.info(f"🔍 超级鹰原始坐标: {coords}")
+    
+    # 调整坐标（减去模板图高度）
+    if tpl_bytes and tpl_height > 0:
+        adjusted_coords = []
+        for x, y in coords:
+            adj_y = y - tpl_height
+            
+            # 验证坐标是否在有效范围内
+            if not (0 <= x <= bg_width and 0 <= adj_y <= bg_height):
+                logging.error(f"❌ 坐标 ({x}, {adj_y}) 超出背景图范围 ({bg_width}x{bg_height})")
+                await asyncio.sleep(1)
+                return await sfrz_captcha_click(client, "", retry_count + 1)
+            
+            adjusted_coords.append((x, adj_y))
+        
+        adjusted_pic_str = '|'.join([f"{x},{y}" for x, y in adjusted_coords])
+        
+        logging.info(f"📊 坐标调整信息:")
+        logging.info(f"   模板图高度: {tpl_height}px")
+        logging.info(f"   调整后坐标: {adjusted_coords}")
+        
+        # 生成标注图片用于调试
+        try:
+            debug_img = bg_img.copy()
+            draw = ImageDraw.Draw(debug_img)
+            
+            for idx, (x, y) in enumerate(adjusted_coords, 1):
+                # 画红色圆圈
+                radius = 10
+                draw.ellipse([x-radius, y-radius, x+radius, y+radius], 
+                            outline='red', width=3)
+                # 标注序号
+                draw.text((x+15, y-15), str(idx), fill='red')
+            
+            # 保存标注图
+            debug_img.save(f"captcha_debug/{uid}_marked.jpg")
+            logging.info(f"💾 标注图已保存: captcha_debug/{uid}_marked.jpg")
+        except Exception as e:
+            logging.warning(f"⚠️ 生成标注图失败: {e}")
+        
+        return uid, adjusted_pic_str, pic_id
+    else:
+        logging.info(f"✅ 识别成功: pic_id={pic_id}, 坐标={coords}")
+        return uid, pic_str, pic_id
 
 
 # async def qiang(client, course_map, course_code, profile_id) -> str:

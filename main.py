@@ -1,4 +1,6 @@
 import statemachine
+import schserver
+import logging
 
 import asyncio
 
@@ -34,6 +36,24 @@ accounts = [
 
 
 async def main():
+    # 初始化超级鹰
+    schserver.init_chaojiying(
+        username="JISOO666",
+        password="01yef1ak",
+        soft_id="977492"
+    )
+    
+    # ===== 新增：测试超级鹰连接 =====
+    try:
+        balance = schserver.CHAOJIYING_CLIENT.get_balance()
+        if balance < 0:
+            logging.error("❌ 超级鹰连接失败，请检查网络或账号")
+            return
+        logging.info(f"✅ 超级鹰连接成功，余额: {balance} 题分")
+    except Exception as e:
+        logging.error(f"❌ 超级鹰初始化失败: {e}")
+        return
+    
     tasks = []
     for account in accounts:
         model = statemachine.QiangModel(
