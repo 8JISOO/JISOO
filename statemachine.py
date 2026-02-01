@@ -292,7 +292,12 @@ class QiangModel:
             timeout=self.timeout_seconds
         )
 
-        self.captcha_uid, captcha_code = await schserver.sfrz_captcha(self.client, self.captcha_uid)
+        # 尝试使用超级鹰识别验证码（支持点选和计算类型）
+        # 如果超级鹰未初始化，则使用传统的OCR方法
+        if schserver.CHAOJIYING_CLIENT is not None:
+            self.captcha_uid, captcha_code = await schserver.sfrz_captcha_click(self.client, self.captcha_uid)
+        else:
+            self.captcha_uid, captcha_code = await schserver.sfrz_captcha(self.client, self.captcha_uid)
 
         login_success, ticket_or_errcode = await schserver.sfrz_login(self.client, self.captcha_uid, captcha_code,
                                                                       self.username, self.password)

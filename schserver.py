@@ -204,9 +204,9 @@ async def sfrz_captcha_click(
         client: httpx.AsyncClient,
         uid: str,
         retry_count: int = 0,
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str]:
     """
-    获取并识别点选验证码
+    获取并识别点选验证码（也支持计算类型验证码）
     
     Args:
         client: httpx客户端
@@ -214,7 +214,7 @@ async def sfrz_captcha_click(
         retry_count: 重试计数
     
     Returns:
-        (uid, 调整后的坐标字符串, pic_id)
+        (uid, 验证码答案/坐标字符串)
     """
     # 添加重试限制
     if retry_count >= 3:
@@ -237,7 +237,7 @@ async def sfrz_captcha_click(
     # 如果是计算类型，使用原来的方法
     if captcha_type == 'COMPUTE':
         captcha_uid, answer = await sfrz_captcha(client, uid)
-        return captcha_uid, str(answer), ""
+        return captcha_uid, str(answer)
     
     # 2. 获取点选验证码的图片
     # 背景图（需要点击的图片）
@@ -370,10 +370,10 @@ async def sfrz_captcha_click(
         except Exception as e:
             logging.warning(f"⚠️ 生成标注图失败: {e}")
         
-        return uid, adjusted_pic_str, pic_id
+        return uid, adjusted_pic_str
     else:
         logging.info(f"✅ 识别成功: pic_id={pic_id}, 坐标={coords}")
-        return uid, pic_str, pic_id
+        return uid, pic_str
 
 
 # async def qiang(client, course_map, course_code, profile_id) -> str:
